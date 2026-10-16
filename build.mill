@@ -1,0 +1,319 @@
+//| mill-jvm-version: system
+//| mvnDeps: ["biz.aQute.bnd:biz.aQute.bndlib:5.1.1"]
+
+package build
+
+import mill.*
+import mill.javalib.*
+import mill.javalib.publish.*
+import mill.util.{JarManifest, Jvm}
+
+/**
+ * Version used for local development. CI overrides it like the Maven build did:
+ * `./mill -Drevision=<git-sha> ...`.
+ */
+val revision: String = sys.props.getOrElse("revision", "1.1.5-SNAPSHOT")
+
+val junitVersion = "4.13.1"
+val batikVersion = "1.17"
+val xmlgraphicsCommonsVersion = "2.9"
+val rhinoVersion = "1.7.14"
+val pdfboxVersion = "3.0.7"
+val jmhVersion = "1.25.2"
+
+val projectUrl = "https://github.com/openhtmltopdf/openhtmltopdf"
+val lgplLicense = License(
+  id = "LGPL-2.1-or-later",
+  name = "GNU Lesser General Public License (LGPL), version 2.1 or later",
+  url = "http://www.gnu.org/licenses/lgpl.html"
+)
+val mitLicense = License(id = "MIT", name = "MIT", url = "https://opensource.org/licenses/MIT")
+val gpl3License = License(
+  id = "GPL-3.0-or-later",
+  name = "GNU General public license GPLv3+",
+  url = "https://www.gnu.org/licenses/gpl-3.0.en.html"
+)
+val developers = Seq(
+  Developer("danfickle", "Daniel Fickling", "https://github.com/danfickle"),
+  Developer("pdoubleya", "Patrick Wright", "https://github.com/pdoubleya"),
+  Developer("peter.brant", "Peter Brant", "https://github.com/peter.brant"),
+  Developer("imario42", "Mario Ivankovits", "https://github.com/imario42"),
+  Developer("madsop-nav", "Mads Opheim", "https://github.com/madsop-nav"),
+  Developer("siegelzc", "Zachary Siegel", "https://github.com/siegelzc")
+)
+
+/** Shared configuration for all modules of the project. */
+trait OpenHtmlModule extends JavaModule {
+  def openHtmlArtifactName: String
+  def openHtmlDescription: String
+
+  /** The Maven build used `openhtmltopdf-xyz/` as the directory of artifact `openhtmltopdf-xyz`. */
+  override def moduleDir = super.moduleDir / os.up / openHtmlArtifactName
+
+  /** Maven source layout instead of the Mill default. */
+  override def sources = Task.Sources(moduleDir / "src" / "main" / "java")
+  def mavenResources = Task.Sources(moduleDir / "src" / "main" / "resources")
+
+  def includeLicenses = true
+  def licenseFiles = Task.Sources(
+    moduleDir / os.up / "LICENSE",
+    moduleDir / os.up / "LICENSE-LGPL-2.1.txt",
+    moduleDir / os.up / "LICENSE-LGPL-3.txt",
+    moduleDir / os.up / "LICENSE-W3C-TEST"
+  )
+  def licenseResources: T[Seq[PathRef]] = Task {
+    if (includeLicenses) {
+      for (f <- licenseFiles())
+        os.copy(f.path, Task.dest / "META-INF" / f.path.last, createFolders = true, replaceExisting = true)
+      Seq(PathRef(Task.dest))
+    } else Seq.empty
+  }
+
+  override def resources = Task { mavenResources() ++ licenseResources() }
+
+  override def javacOptions = Task {
+    super.javacOptions() ++ Seq("-source", "8", "-target", "8", "-Xlint:deprecation")
+  }
+
+  // Maven generated javadocs with `-source 8 -doclint none`; some comments
+  // contain invalid HTML that doclint rejects.
+  override def javadocOptions = Seq("-source", "8", "-Xdoclint:none")
+
+  /** Test suites follow the Maven layout and, like Maven, run in the module directory. */
+  trait OpenHtmlTests extends JavaTests {
+    override def sources = Task.Sources(OpenHtmlModule.this.moduleDir / "src" / "test" / "java")
+    override def resources = Task.Sources(OpenHtmlModule.this.moduleDir / "src" / "test" / "resources")
+    override def testSandboxWorkingDir = false
+    override def forkWorkingDir = Task { OpenHtmlModule.this.moduleDir }
+  }
+}
+
+/** Publishing setup shared by all released modules. */
+trait OpenHtmlPublishModule extends OpenHtmlModule, PublishModule {
+  override def artifactName = Task { openHtmlArtifactName }
+  def publishVersion = revision
+  def pomSettings = PomSettings(
+    description = openHtmlDescription,
+    organization = "io.github.openhtmltopdf",
+    url = projectUrl,
+    licenses = Seq(lgplLicense),
+    versionControl = VersionControl.github("openhtmltopdf", "openhtmltopdf"),
+    developers = developers
+  )
+}
+
+/**
+ * The Maven build generated OSGi bundle manifests via `maven-bundle-plugin`
+ * (which is built on bnd); this calls bnd directly. It runs after
+ * `PublishModule` in the linearization so both the `Implementation-*`
+ * headers and the `Bundle-*` headers end up in the manifest.
+ */
+trait OsgiBundleModule extends OpenHtmlModule {
+  def bundleName: String
+
+  def osgiBundleSymbolicName =
+    "io.github.openhtmltopdf." + openHtmlArtifactName.stripPrefix("openhtmltopdf-")
+
+  def osgiManifest: T[JarManifest] = Task {
+    import aQute.bnd.osgi.Builder
+    import scala.jdk.CollectionConverters.*
+
+    // bnd analyzes a jar; feed it classes plus the module resources so that
+    // resource-only packages are exported just like the Maven build did.
+    val inputJar = Task.dest / "osgi-input.jar"
+    val entries = (compile().classes.path +: resources().map(_.path)).filter(os.exists(_))
+    Jvm.createJar(inputJar, entries)
+
+    // bnd computes Import-Package version ranges from OSGi metadata on the
+    // classpath. Use the dependencies' jars (not their un-annotated classes
+    // directories) so that those ranges come out like in the Maven build.
+    val ownClasses = compile().classes.path
+    val depClasses = transitiveLocalClasspath().map(_.path).toSet
+    val classpath = transitiveJars() ++
+      compileClasspath().filter(p => p.path != ownClasses && !depClasses.contains(p.path))
+
+    val builder = new Builder()
+    builder.setProperty("Bundle-SymbolicName", osgiBundleSymbolicName)
+    builder.setProperty("Bundle-Name", bundleName)
+    builder.setProperty("Bundle-Description", openHtmlDescription)
+    builder.setProperty("Bundle-License", lgplLicense.url)
+    // OSGi versions use dots; the Maven plugin converts `1.1.5-SNAPSHOT` the same way.
+    builder.setProperty("Bundle-Version", revision.replace('-', '.'))
+    builder.setProperty("Export-Package", "*")
+    builder.setJar(inputJar.toIO)
+
+    for (dep <- classpath if os.exists(dep.path)) builder.addClasspath(dep.path.toIO)
+
+    val manifest = builder.calcManifest()
+    val main = manifest.getMainAttributes.asScala.iterator
+      .map { case (k, v) => k.toString -> v.toString }
+      .toMap
+    JarManifest(main = main)
+  }
+
+  override def manifest: T[JarManifest] = Task {
+    super.manifest().add(osgiManifest().main.toSeq*)
+  }
+}
+
+object core extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf Core Renderer"
+  def openHtmlArtifactName = "openhtmltopdf-core"
+  def openHtmlDescription =
+    "Open HTML to PDF is a CSS 2.1 renderer written in Java.  This artifact contains the core rendering and layout code."
+
+  object test extends OpenHtmlTests, TestModule.Junit4 {
+    def junit4Version = junitVersion
+  }
+}
+
+object pdfbox extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf PDF Rendering (Apache PDF-BOX 3)"
+  def openHtmlArtifactName = "openhtmltopdf-pdfbox"
+  def openHtmlDescription =
+    "Openhtmltopdf is a CSS 2.1 renderer written in Java. This artifact supports PDF output with Apache PDF-BOX 3."
+  def moduleDeps = Seq(core)
+  def mvnDeps = Seq(
+    mvn"org.apache.pdfbox:pdfbox:$pdfboxVersion",
+    mvn"org.apache.pdfbox:xmpbox:$pdfboxVersion",
+    mvn"de.rototor.pdfbox:graphics2d:3.0.1".exclude("org.apache.pdfbox" -> "pdfbox")
+  )
+}
+
+object rtlSupport extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf RTL Support"
+  def openHtmlArtifactName = "openhtmltopdf-rtl-support"
+  def openHtmlDescription =
+    "Open HTML to PDF is a CSS 2.1 renderer written in Java.  This artifact supports right-to-left text mixed with left-to-right text."
+  def moduleDeps = Seq(core)
+  def mvnDeps = Seq(mvn"com.ibm.icu:icu4j:77.1")
+}
+
+object svgSupport extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf SVG Support"
+  def openHtmlArtifactName = "openhtmltopdf-svg-support"
+  def openHtmlDescription =
+    "Open HTML to PDF is a CSS 2.1 renderer written in Java.  This artifact supports drawing SVG graphics on to PDFs using Apache Batik."
+  def moduleDeps = Seq(core)
+  def mvnDeps = Seq(
+    mvn"org.apache.xmlgraphics:batik-transcoder:$batikVersion",
+    mvn"org.apache.xmlgraphics:batik-codec:$batikVersion",
+    mvn"org.apache.xmlgraphics:batik-ext:$batikVersion",
+    mvn"org.apache.xmlgraphics:xmlgraphics-commons:$xmlgraphicsCommonsVersion"
+  )
+}
+
+object java2d extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf Image Rendering (Java2D)"
+  def openHtmlArtifactName = "openhtmltopdf-java2d"
+  def openHtmlDescription =
+    "Openhtmltopdf is a CSS 2.1 renderer written in Java. This artifact supports image output with the Java2D API."
+  def moduleDeps = Seq(core)
+}
+
+object objects extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf PDF Rendering (Apache PDF-BOX 3)"
+  def openHtmlArtifactName = "openhtmltopdf-objects"
+  def openHtmlDescription =
+    "Openhtmltopdf is a CSS 2.1 renderer written in Java. This artifact adds some basic object-tag implementation for the PDF output. Some of this also works with the Java2D output, but the PDFOut is required."
+  def moduleDeps = Seq(pdfbox)
+  def mvnDeps = Seq(
+    mvn"org.jfree:jfreechart:1.5.0",
+    mvn"com.google.zxing:javase:3.4.0"
+  )
+}
+
+object mathmlSupport extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf MathML Support"
+  def openHtmlArtifactName = "openhtmltopdf-mathml-support"
+  def openHtmlDescription =
+    "Open HTML to PDF is a CSS 2.1 renderer written in Java. This artifact supports drawing MathML graphics on to PDFs using JEuclid."
+  def moduleDeps = Seq(core, svgSupport)
+  def mvnDeps = Seq(mvn"de.rototor.jeuclid:jeuclid-core:3.1.12")
+}
+
+object latexSupport extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf Latex Math Support"
+  def openHtmlArtifactName = "openhtmltopdf-latex-support"
+  def openHtmlDescription =
+    "Open HTML to PDF is a CSS 2.1 renderer written in Java.  This artifact supports rendering Latex markup (including math) on to PDFs using SnuggleTex."
+  def moduleDeps = Seq(core, mathmlSupport)
+  def mvnDeps = Seq(mvn"de.rototor.snuggletex:snuggletex-core:1.3.0")
+}
+
+object slf4jSupport extends OpenHtmlModule, OpenHtmlPublishModule, OsgiBundleModule {
+  def bundleName = "Openhtmltopdf slf4j Support"
+  def openHtmlArtifactName = "openhtmltopdf-slf4j"
+  def openHtmlDescription =
+    "Open HTML to PDF is a CSS 2.1 renderer written in Java.  This artifact supports sending Open HTML to PDF log output to the slf4j logging facade."
+  def moduleDeps = Seq(core)
+  def compileMvnDeps = Seq(mvn"org.slf4j:slf4j-api:1.7.19")
+
+  object test extends OpenHtmlTests, TestModule.Junit4 {
+    def junit4Version = junitVersion
+    override def moduleDeps = super.moduleDeps ++ Seq(pdfbox)
+    def mvnDeps = Seq(mvn"org.slf4j:slf4j-simple:1.7.19")
+  }
+}
+
+/** Not deployed with a release. */
+object pdfaTesting extends OpenHtmlModule {
+  def openHtmlArtifactName = "openhtmltopdf-pdfa-testing"
+  def openHtmlDescription =
+    "Code to test against the PDF/A standard. It is not deployed with a release and unlike the rest of the project, is licensed under the GPL."
+  def moduleDeps = Seq(core, pdfbox)
+
+  object test extends OpenHtmlTests, TestModule.Junit4 {
+    def junit4Version = junitVersion
+    def mvnDeps = Seq(mvn"org.verapdf:validation-model:1.30.2")
+  }
+}
+
+/** Not deployed with a release. */
+object templates extends OpenHtmlModule {
+  def openHtmlArtifactName = "openhtmltopdf-templates"
+  def openHtmlDescription =
+    "PDF templates and website generation for Openhtmltopdf. It is not deployed with a release."
+  override def includeLicenses = false
+  def moduleDeps = Seq(pdfbox, svgSupport)
+  def mvnDeps = Seq(
+    mvn"org.thymeleaf:thymeleaf:3.1.5.RELEASE",
+    mvn"org.thymeleaf.extras:thymeleaf-extras-java8time:3.0.4.RELEASE",
+    mvn"org.imgscalr:imgscalr-lib:4.2",
+    mvn"org.slf4j:slf4j-simple:1.7.30",
+    mvn"org.yaml:snakeyaml:2.4",
+    mvn"org.codelibs:jhighlight:1.0.3"
+  )
+
+  object test extends OpenHtmlTests, TestModule.Junit4 {
+    def junit4Version = junitVersion
+  }
+}
+
+/** Misc. example code, not deployed with a release. */
+object examples extends OpenHtmlModule {
+  def openHtmlArtifactName = "openhtmltopdf-examples"
+  def openHtmlDescription = "Misc. Open HTML to PDF example code. It is not deployed with a release."
+  def moduleDeps = Seq(core, pdfbox, rtlSupport, svgSupport, mathmlSupport, java2d, objects, latexSupport)
+  def mvnDeps = Seq(
+    mvn"org.mozilla:rhino:$rhinoVersion",
+    mvn"org.jfree:jfreechart:1.5.0",
+    mvn"com.google.zxing:javase:3.4.0",
+    mvn"org.freemarker:freemarker:2.3.27-incubating",
+    mvn"org.openjdk.jmh:jmh-core:$jmhVersion",
+    mvn"org.openjdk.jmh:jmh-generator-annprocess:$jmhVersion"
+  )
+
+  object test extends OpenHtmlTests, TestModule.Junit4 {
+    def junit4Version = junitVersion
+    def mvnDeps = Seq(mvn"org.jsoup:jsoup:1.23.2")
+  }
+}
+
+/** The JMH benchmark harness, replacing the shaded `benchmarks.jar` of the Maven build. */
+object benchmarks extends JavaModule {
+  def moduleDeps = Seq(examples)
+  def sources = Task.Sources()
+  def resources = Task.Sources()
+  def mainClass = Some("org.openjdk.jmh.Main")
+}
