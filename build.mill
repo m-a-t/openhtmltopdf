@@ -1,6 +1,22 @@
 //| mill-jvm-version: system
 //| mvnDeps: ["biz.aQute.bnd:biz.aQute.bndlib:5.1.1"]
 
+/**
+ * This build also works when this repository is nested inside another Mill
+ * workspace, e.g. as a git submodule at `third_party/openhtmltopdf`. The
+ * consuming workspace needs:
+ *
+ *   1. `//| mill-allow-nested-build-mill: true` in its root build.mill
+ *   2. `//| mvnDeps: ["biz.aQute.bnd:biz.aQute.bndlib:5.1.1"]` there too,
+ *      since nested build files cannot contribute build-level dependencies
+ *   3. when the submodule is more than one level deep, a one-line marker per
+ *      intermediate folder, e.g. `third_party/package.mill` containing
+ *      `package build.third_party`
+ *
+ * Modules and tasks are then addressed with the `build.` prefix, e.g.
+ * `def moduleDeps = Seq(build.third_party.openhtmltopdf.pdfbox)` and
+ * `./mill third_party.openhtmltopdf.core.test`.
+ */
 package build
 
 import mill.*
