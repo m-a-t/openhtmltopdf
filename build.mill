@@ -9,10 +9,11 @@ import mill.javalib.publish.*
 import mill.util.{JarManifest, Jvm}
 
 /**
- * Version used for local development. CI overrides it like the Maven build did:
- * `./mill -Drevision=<git-sha> ...`.
+ * Version used for local development. CI overrides it with the `REVISION`
+ * environment variable (the Maven build used `-Drevision=<git-sha>`).
  */
-val revision: String = sys.props.getOrElse("revision", "1.1.5-SNAPSHOT")
+val defaultRevision: String = "1.1.5-SNAPSHOT"
+def currentRevision: T[String] = Task.Input { Task.env.getOrElse("REVISION", defaultRevision) }
 
 val junitVersion = "4.13.1"
 val batikVersion = "1.17"
@@ -91,7 +92,7 @@ trait OpenHtmlModule extends JavaModule {
 /** Publishing setup shared by all released modules. */
 trait OpenHtmlPublishModule extends OpenHtmlModule, PublishModule {
   override def artifactName = Task { openHtmlArtifactName }
-  def publishVersion = revision
+  def publishVersion = currentRevision()
   def pomSettings = PomSettings(
     description = openHtmlDescription,
     organization = "io.github.openhtmltopdf",
@@ -138,7 +139,7 @@ trait OsgiBundleModule extends OpenHtmlModule {
     builder.setProperty("Bundle-Description", openHtmlDescription)
     builder.setProperty("Bundle-License", lgplLicense.url)
     // OSGi versions use dots; the Maven plugin converts `1.1.5-SNAPSHOT` the same way.
-    builder.setProperty("Bundle-Version", revision.replace('-', '.'))
+    builder.setProperty("Bundle-Version", currentRevision().replace('-', '.'))
     builder.setProperty("Export-Package", "*")
     builder.setJar(inputJar.toIO)
 
