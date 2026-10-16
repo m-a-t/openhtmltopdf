@@ -28,12 +28,6 @@ val lgplLicense = License(
   name = "GNU Lesser General Public License (LGPL), version 2.1 or later",
   url = "http://www.gnu.org/licenses/lgpl.html"
 )
-val mitLicense = License(id = "MIT", name = "MIT", url = "https://opensource.org/licenses/MIT")
-val gpl3License = License(
-  id = "GPL-3.0-or-later",
-  name = "GNU General public license GPLv3+",
-  url = "https://www.gnu.org/licenses/gpl-3.0.en.html"
-)
 val developers = Seq(
   Developer("danfickle", "Daniel Fickling", "https://github.com/danfickle"),
   Developer("pdoubleya", "Patrick Wright", "https://github.com/pdoubleya"),
