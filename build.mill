@@ -35,7 +35,7 @@ val junitVersion = "4.13.1"
 val batikVersion = "1.17"
 val xmlgraphicsCommonsVersion = "2.9"
 val rhinoVersion = "1.7.14"
-val pdfboxVersion = "3.0.7"
+val pdfboxVersion = "3.0.8"
 val jmhVersion = "1.25.2"
 
 val projectUrl = "https://github.com/openhtmltopdf/openhtmltopdf"
