@@ -425,6 +425,10 @@ public class TableCellBox extends BlockBox {
             return result;
         }
 
+        if (getStyle().getRowSpan() > 1) {
+            return getRowSpanContentLimitedBorderEdge(c, result, contentLimitContainer);
+        }
+
         ContentLimit limit = contentLimitContainer.getContentLimit(c.getPageNo());
 
         if (limit == null) {
@@ -440,45 +444,13 @@ public class TableCellBox extends BlockBox {
                 top = result.y;
             } else {
                 top = limit.getTop() - ((TableRowBox)getParent()).getExtraSpaceTop();
-
-                // For a rowspan cell, the parent row's content limit tracks where the
-                // cell's own content landed on this page rather than the top of the
-                // table's content area, so anchor the cell to the repeated header instead.
-                if (getStyle().getRowSpan() > 1) {
-                    int theadBottom = getTheadBottom(getTable());
-                    if (theadBottom != -1) {
-                        top = theadBottom;
-                    }
-                }
             }
-            
+
             int bottom;
             if (c.getPageNo() == contentLimitContainer.getLastPageNo()) {
                 bottom = result.y + result.height;
             } else {
-                // For rowspan cells, find the maximum bottom among all rows covered
-                int maxBottom = limit.getBottom() != ContentLimit.UNDEFINED ?
-                        limit.getBottom() + ((TableRowBox)getParent()).getExtraSpaceBottom() :
-                        result.y + result.height;
-
-                // Check all rows covered by rowspan by traversing siblings
-                int rowSpan = getStyle().getRowSpan();
-                Box currentBox = getParent();
-                for (int i = 1; i < rowSpan && currentBox != null; i++) {
-                    currentBox = currentBox.getNextSibling();
-                    if (currentBox instanceof TableRowBox) {
-                        TableRowBox spannedRow = (TableRowBox) currentBox;
-                        ContentLimitContainer spannedContainer = spannedRow.getContentLimitContainer();
-                        if (spannedContainer != null) {
-                            ContentLimit spannedLimit = spannedContainer.getContentLimit(c.getPageNo());
-                            if (spannedLimit != null && spannedLimit.getBottom() != ContentLimit.UNDEFINED) {
-                                int spannedBottom = spannedLimit.getBottom() + spannedRow.getExtraSpaceBottom();
-                                maxBottom = Math.max(maxBottom, spannedBottom);
-                            }
-                        }
-                    }
-                }
-
+                int maxBottom = limit.getBottom() + ((TableRowBox)getParent()).getExtraSpaceBottom();
                 bottom = Math.min(result.y + result.height, maxBottom);
             }
             
@@ -487,8 +459,123 @@ public class TableCellBox extends BlockBox {
             
             return result;
         }
-    }  
-    
+    }
+
+    /**
+     * The border edge of a rowspan cell's fragment on the current page. The rows the
+     * cell covers determine its extent: it starts at the first covered row on the
+     * page and ends at the last one, or at the page break inside a split row.
+     */
+    private Rectangle getRowSpanContentLimitedBorderEdge(
+            RenderingContext c, Rectangle result, ContentLimitContainer contentLimitContainer) {
+        int pageNo = c.getPageNo();
+
+        if (pageNo < contentLimitContainer.getInitialPageNo()
+                || pageNo > contentLimitContainer.getLastPageNo()) {
+            return null;
+        }
+
+        int top;
+        if (pageNo == contentLimitContainer.getInitialPageNo()) {
+            top = result.y;
+        } else {
+            top = getRowSpanTop(c, result.y);
+
+            int theadBottom = getTheadBottom(getTable());
+            if (theadBottom != -1) {
+                top = theadBottom;
+            }
+        }
+
+        int bottom;
+        if (pageNo == contentLimitContainer.getLastPageNo()) {
+            bottom = result.y + result.height;
+        } else {
+            bottom = Math.min(result.y + result.height, getRowSpanBottom(c, result.y + result.height));
+        }
+
+        result.y = top;
+        result.height = bottom - top;
+
+        return result;
+    }
+
+    /**
+     * The top border edge of the rowspan fragment on the current page: the top of the
+     * first covered row that starts here, or the content edge of one that continues
+     * from an earlier page, above which the row's padding and border still follow.
+     */
+    private int getRowSpanTop(RenderingContext c, int fallback) {
+        int top = Integer.MAX_VALUE;
+        int rowSpan = getStyle().getRowSpan();
+        Box currentBox = getParent();
+
+        for (int i = 0; i < rowSpan && currentBox != null; i++) {
+            if (currentBox instanceof TableRowBox) {
+                TableRowBox spannedRow = (TableRowBox) currentBox;
+                ContentLimitContainer spannedContainer = spannedRow.getContentLimitContainer();
+
+                if (spannedContainer != null) {
+                    ContentLimit spannedLimit = spannedContainer.getContentLimit(c.getPageNo());
+
+                    if (spannedLimit != null && spannedLimit.getTop() != ContentLimit.UNDEFINED
+                            && isRowOnPage(spannedRow, c)) {
+                        int rowTop = spannedRow.getAbsY();
+                        int spannedTop = spannedLimit.getTop() == rowTop ?
+                                rowTop :
+                                spannedLimit.getTop() - spannedRow.getExtraSpaceTop();
+                        top = Math.min(top, spannedTop);
+                    }
+                }
+            }
+
+            currentBox = currentBox.getNextSibling();
+        }
+
+        return top == Integer.MAX_VALUE ? fallback : top;
+    }
+
+    /** The bottom border edge of the rowspan fragment on the current page. */
+    private int getRowSpanBottom(RenderingContext c, int fallback) {
+        int bottom = Integer.MIN_VALUE;
+        int rowSpan = getStyle().getRowSpan();
+        Box currentBox = getParent();
+
+        for (int i = 0; i < rowSpan && currentBox != null; i++) {
+            if (currentBox instanceof TableRowBox) {
+                TableRowBox spannedRow = (TableRowBox) currentBox;
+                ContentLimitContainer spannedContainer = spannedRow.getContentLimitContainer();
+
+                if (spannedContainer != null) {
+                    ContentLimit spannedLimit = spannedContainer.getContentLimit(c.getPageNo());
+
+                    if (spannedLimit != null && spannedLimit.getBottom() != ContentLimit.UNDEFINED
+                            && isRowOnPage(spannedRow, c)) {
+                        int rowBottom = spannedRow.getAbsY() + spannedRow.getHeight();
+
+                        // A page break between rows ends at the row's own bottom edge. A
+                        // break inside the row ends at its content bottom, below which
+                        // padding and border follow.
+                        int spannedBottom = spannedLimit.getBottom() == rowBottom ?
+                                rowBottom :
+                                spannedLimit.getBottom() + spannedRow.getExtraSpaceBottom();
+                        bottom = Math.max(bottom, spannedBottom);
+                    }
+                }
+            }
+
+            currentBox = currentBox.getNextSibling();
+        }
+
+        return bottom == Integer.MIN_VALUE ? fallback : bottom;
+    }
+
+    private static boolean isRowOnPage(TableRowBox row, RenderingContext c) {
+        int rowTop = row.getAbsY();
+        int rowBottom = rowTop + row.getHeight();
+        return rowBottom > c.getPage().getTop() && rowTop < c.getPage().getBottom(c);
+    }
+
     public Rectangle getChildrenClipEdge(RenderingContext c) {
         if (c.isPrint() && getTable().getStyle().isPaginateTable()) {
             Rectangle bounds = getContentLimitedBorderEdge(c);
